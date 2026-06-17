@@ -138,6 +138,87 @@ export class DiscordClient {
     );
   }
 
+  // ============ EDIT & DELETE ============
+
+  async editMessage(
+    channelId: string,
+    messageId: string,
+    content: string
+  ): Promise<DiscordMessage> {
+    return this.request<DiscordMessage>(
+      `/channels/${channelId}/messages/${messageId}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ content }),
+      }
+    );
+  }
+
+  async deleteMessage(
+    channelId: string,
+    messageId: string
+  ): Promise<void> {
+    await this.request<void>(
+      `/channels/${channelId}/messages/${messageId}`,
+      { method: 'DELETE' }
+    );
+  }
+
+  // ============ TYPING ============
+
+  async triggerTyping(channelId: string): Promise<void> {
+    await this.request<void>(
+      `/channels/${channelId}/typing`,
+      { method: 'POST' }
+    );
+  }
+
+  // ============ IMAGES ============
+
+  async sendImage(
+    channelId: string,
+    url: string,
+    description?: string
+  ): Promise<DiscordMessage> {
+    return this.request<DiscordMessage>(
+      `/channels/${channelId}/messages`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          embeds: [{
+            image: { url },
+            ...(description ? { description } : {}),
+          }],
+        }),
+      }
+    );
+  }
+
+  // ============ EMOJIS ============
+
+  async listEmojis(guildId: string): Promise<any[]> {
+    return this.request<any[]>(`/guilds/${guildId}/emojis`);
+  }
+
+  // ============ STICKERS ============
+
+  async listStickers(guildId: string): Promise<any[]> {
+    return this.request<any[]>(`/guilds/${guildId}/stickers`);
+  }
+
+  async sendSticker(
+    channelId: string,
+    stickerId: string
+  ): Promise<DiscordMessage> {
+    return this.request<DiscordMessage>(
+      `/channels/${channelId}/messages`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ sticker_ids: [stickerId] }),
+      }
+    );
+  }
+
   // ============ SERVERS ============
 
   async listGuilds(): Promise<DiscordGuild[]> {

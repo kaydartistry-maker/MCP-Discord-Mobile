@@ -3,6 +3,8 @@
 
 import { DiscordClient } from './discord';
 
+const DISCORD_CDN = 'https://cdn.discordapp.com';
+
 interface Env {
   DISCORD_TOKEN: string;
   MCP_SECRET: string;
@@ -101,42 +103,247 @@ const TOOLS = [
       required: ['guildId'],
     },
   },
+  {
+    name: 'discord_edit_message',
+    description: 'Edit a previously sent message',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: 'The channel ID' },
+        messageId: { type: 'string', description: 'The message ID to edit' },
+        content: { type: 'string', description: 'The new message content' },
+      },
+      required: ['channelId', 'messageId', 'content'],
+    },
+  },
+  {
+    name: 'discord_delete_message',
+    description: 'Delete a message from a channel',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: 'The channel ID' },
+        messageId: { type: 'string', description: 'The message ID to delete' },
+      },
+      required: ['channelId', 'messageId'],
+    },
+  },
+  {
+    name: 'discord_typing',
+    description: 'Show a typing indicator in a channel (lasts ~10 seconds)',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: 'The channel ID' },
+      },
+      required: ['channelId'],
+    },
+  },
+  {
+    name: 'discord_send_image',
+    description: 'Send an image to a channel via URL embed',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: 'The channel ID to send to' },
+        url: { type: 'string', description: 'The image URL' },
+        description: { type: 'string', description: 'Optional image description/caption' },
+      },
+      required: ['channelId', 'url'],
+    },
+  },
+  {
+    name: 'discord_list_emojis',
+    description: 'List all custom emojis in a server',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        guildId: { type: 'string', description: 'The server (guild) ID' },
+      },
+      required: ['guildId'],
+    },
+  },
+  {
+    name: 'discord_list_stickers',
+    description: 'List all stickers in a server',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        guildId: { type: 'string', description: 'The server (guild) ID' },
+      },
+      required: ['guildId'],
+    },
+  },
+  {
+    name: 'discord_send_sticker',
+    description: 'Send a sticker to a channel',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: 'The channel ID' },
+        stickerId: { type: 'string', description: 'The sticker ID to send' },
+      },
+      required: ['channelId', 'stickerId'],
+    },
+  },
 ];
+
+// ============ EMOTE RESOLVER ============
+
+const EMOTE_REGEX = /<(a?):(\w+):(\d+)>/g;
+
+function resolveEmotes(content: string): { code: string; name: string; id: string; animated: boolean; url: string; mimeType: string }[] {
+  if (!content || typeof content !== 'string') return [];
+
+  const emotes: { code: string; name: string; id: string; animated: boolean; url: string; mimeType: string }[] = [];
+  let match;
+  EMOTE_REGEX.lastIndex = 0;
+
+  while ((match = EMOTE_REGEX.exec(content)) !== null) {
+    const [fullCode, animatedFlag, name, id] = match;
+    const extension = animatedFlag === 'a' ? 'gif' : 'png';
+    const mimeType = animatedFlag === 'a' ? 'image/gif' : 'image/png';
+    emotes.push({
+      code: fullCode,
+      name,
+      id,
+      animated: animatedFlag === 'a',
+      url: `${DISCORD_CDN}/emojis/${id}.${extension}?size=128`,
+      mimeType,
+    });
+  }
+
+  return emotes;
+}
+
+// ============ EMBED RESOLVER ============
+
+function resolveEmbedImages(embeds: any[]): { url: string; source: string; title: string | null }[] {
+  if (!Array.isArray(embeds) || embeds.length === 0) return [];
+
+  const images: { url: string; source: string; title: string | null }[] = [];
+  for (const embed of embeds) {
+    if (embed.image?.url) {
+      images.push({ url: embed.image.url, source: embed.type || 'image', title: embed.title || null });
+    } else if (embed.thumbnail?.url) {
+      images.push({ url: embed.thumbnail.url, source: embed.type || 'thumbnail', title: embed.title || null });
+    } else if (embed.video?.url) {
+      images.push({ url: embed.video.url, source: embed.type || 'video', title: embed.title || null });
+    }
+  }
+  return images;
+}
+
+// ============ ATTACHMENT RESOLVER ============
+
+function resolveImageAttachments(attachments: any[]): { url: string; filename: string; contentType: string; size: number }[] {
+  if (!Array.isArray(attachments) || attachments.length === 0) return [];
+
+  const images: { url: string; filename: string; contentType: string; size: number }[] = [];
+  for (const att of attachments) {
+    const contentType = att.content_type || '';
+    if (contentType.startsWith('image/')) {
+      images.push({
+        url: att.url,
+        filename: att.filename || 'image',
+        contentType,
+        size: att.size || 0,
+      });
+    }
+  }
+  return images;
+}
+
+// ============ IMAGE FETCH ============
+
+async function fetchImageAsBlock(imageMeta: { url: string; mimeType?: string }): Promise<{ type: string; data: string; mimeType: string } | null> {
+  try {
+    const response = await fetch(imageMeta.url, { headers: { 'Accept': 'image/gif,image/*' } });
+    if (!response.ok) return null;
+
+    const arrayBuffer = await response.arrayBuffer();
+    const base64 = btoa(
+      new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
+    );
+    const contentType = response.headers.get('content-type') || imageMeta.mimeType || 'image/png';
+
+    return {
+      type: 'image',
+      data: base64,
+      mimeType: contentType,
+    };
+  } catch {
+    return null;
+  }
+}
 
 async function handleToolCall(
   client: DiscordClient,
   name: string,
   args: Record<string, any>
-): Promise<{ content: { type: string; text: string }[]; isError?: boolean }> {
+): Promise<{ content: any[]; isError?: boolean }> {
   try {
     switch (name) {
       case 'discord_read_messages': {
         const messages = await client.readMessages(args.channelId, args.limit || 50);
-        const formatted = messages.map((m) => ({
-          id: m.id,
-          content: m.content,
-          author: {
-            id: m.author.id,
-            username: m.author.username,
-            bot: m.author.bot,
-          },
-          timestamp: m.timestamp,
-          attachments: m.attachments.length,
-          embeds: m.embeds.length,
-          replyTo: m.message_reference?.message_id || null,
-        }));
-        return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify(
-                { channelId: args.channelId, messageCount: formatted.length, messages: formatted },
-                null,
-                2
-              ),
+        const contentBlocks: any[] = [];
+        const allImageMetas: { url: string; mimeType?: string; label: string }[] = [];
+
+        const formatted = messages.map((m) => {
+          const emotes = resolveEmotes(m.content);
+          const embedImages = resolveEmbedImages(m.embeds);
+          const imageAttachments = resolveImageAttachments(m.attachments);
+
+          // Collect images for fetching
+          for (const att of imageAttachments) {
+            allImageMetas.push({ url: att.url, mimeType: att.contentType, label: `${m.author.username}: ${att.filename}` });
+          }
+          for (const img of embedImages) {
+            allImageMetas.push({ url: img.url, label: `${m.author.username}: embed (${img.source})` });
+          }
+
+          return {
+            id: m.id,
+            content: m.content,
+            author: {
+              id: m.author.id,
+              username: m.author.username,
+              bot: m.author.bot,
             },
-          ],
-        };
+            timestamp: m.timestamp,
+            emotes: emotes.length > 0 ? emotes : undefined,
+            imageAttachments: imageAttachments.length > 0 ? imageAttachments : undefined,
+            embedImages: embedImages.length > 0 ? embedImages : undefined,
+            replyTo: m.message_reference?.message_id || null,
+          };
+        });
+
+        contentBlocks.push({
+          type: 'text',
+          text: JSON.stringify(
+            { channelId: args.channelId, messageCount: formatted.length, messages: formatted },
+            null,
+            2
+          ),
+        });
+
+        // Fetch actual images (cap at 10 to avoid timeouts)
+        const imagesToFetch = allImageMetas.slice(0, 10);
+        const imageResults = await Promise.all(
+          imagesToFetch.map(async (meta) => {
+            const block = await fetchImageAsBlock(meta);
+            return block ? { block, label: meta.label } : null;
+          })
+        );
+
+        for (const result of imageResults) {
+          if (result) {
+            contentBlocks.push({ type: 'text', text: `📎 ${result.label}` });
+            contentBlocks.push(result.block);
+          }
+        }
+
+        return { content: contentBlocks };
       }
 
       case 'discord_send': {
@@ -217,6 +424,83 @@ async function handleToolCall(
               ),
             },
           ],
+        };
+      }
+
+      case 'discord_edit_message': {
+        await client.editMessage(args.channelId, args.messageId, args.content);
+        return {
+          content: [{ type: 'text', text: `Message ${args.messageId} edited in ${args.channelId}` }],
+        };
+      }
+
+      case 'discord_delete_message': {
+        await client.deleteMessage(args.channelId, args.messageId);
+        return {
+          content: [{ type: 'text', text: `Message ${args.messageId} deleted from ${args.channelId}` }],
+        };
+      }
+
+      case 'discord_typing': {
+        await client.triggerTyping(args.channelId);
+        return {
+          content: [{ type: 'text', text: `Typing indicator triggered in ${args.channelId}` }],
+        };
+      }
+
+      case 'discord_send_image': {
+        await client.sendImage(args.channelId, args.url, args.description);
+        return {
+          content: [{ type: 'text', text: `Image sent to ${args.channelId}` }],
+        };
+      }
+
+      case 'discord_list_emojis': {
+        const emojis = await client.listEmojis(args.guildId);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                emojis.map((e: any) => ({
+                  id: e.id,
+                  name: e.name,
+                  animated: e.animated,
+                  usage: `<${e.animated ? 'a' : ''}:${e.name}:${e.id}>`,
+                })),
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      case 'discord_list_stickers': {
+        const stickers = await client.listStickers(args.guildId);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                stickers.map((s: any) => ({
+                  id: s.id,
+                  name: s.name,
+                  description: s.description,
+                  tags: s.tags,
+                })),
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      case 'discord_send_sticker': {
+        await client.sendSticker(args.channelId, args.stickerId);
+        return {
+          content: [{ type: 'text', text: `Sticker ${args.stickerId} sent to ${args.channelId}` }],
         };
       }
 
