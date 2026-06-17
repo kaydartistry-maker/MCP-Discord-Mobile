@@ -138,6 +138,107 @@ export class DiscordClient {
     );
   }
 
+  // ============ FILE ATTACHMENTS ============
+
+  async sendFileAttachment(
+    channelId: string,
+    fileData: Uint8Array,
+    filename: string,
+    contentType: string,
+    messageContent?: string
+  ): Promise<DiscordMessage> {
+    const url = `${DISCORD_API}/channels/${channelId}/messages`;
+
+    const formData = new FormData();
+    const blob = new Blob([fileData], { type: contentType });
+    formData.append('files[0]', blob, filename);
+
+    const payload: any = {
+      attachments: [{ id: '0', filename }],
+    };
+    if (messageContent) {
+      payload.content = messageContent;
+    }
+    formData.append('payload_json', JSON.stringify(payload));
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bot ${this.token}`,
+      },
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Discord API error ${response.status}: ${error}`);
+    }
+
+    return response.json();
+  }
+
+  // ============ VOICE MESSAGES ============
+
+  async sendVoiceMessage(
+    channelId: string,
+    oggData: Uint8Array,
+    durationSecs: number,
+    waveform: string
+  ): Promise<DiscordMessage> {
+    // Step 1: Request a pre-signed upload URL from Discord
+    const uploadRequest = await this.request<{
+      attachments: Array<{
+        id: string;
+        upload_url: string;
+        upload_filename: string;
+      }>;
+    }>(
+      `/channels/${channelId}/attachments`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          files: [{
+            filename: 'voice-message.ogg',
+            file_size: oggData.length,
+            id: '0',
+          }],
+        }),
+      }
+    );
+
+    const { upload_url, upload_filename } = uploadRequest.attachments[0];
+
+    // Step 2: Upload OGG data to Discord's CDN (no auth header — URL is pre-signed)
+    const uploadResponse = await fetch(upload_url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'audio/ogg' },
+      body: oggData,
+    });
+
+    if (!uploadResponse.ok) {
+      const error = await uploadResponse.text();
+      throw new Error(`Discord upload error ${uploadResponse.status}: ${error}`);
+    }
+
+    // Step 3: Send the message with voice message flag
+    return this.request<DiscordMessage>(
+      `/channels/${channelId}/messages`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          flags: 8192,
+          attachments: [{
+            id: '0',
+            filename: 'voice-message.ogg',
+            uploaded_filename: upload_filename,
+            duration_secs: durationSecs,
+            waveform: waveform,
+          }],
+        }),
+      }
+    );
+  }
+
   // ============ EDIT & DELETE ============
 
   async editMessage(

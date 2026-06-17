@@ -8,6 +8,7 @@ const DISCORD_CDN = 'https://cdn.discordapp.com';
 interface Env {
   DISCORD_TOKEN: string;
   MCP_SECRET: string;
+  ELEVENLABS_API_KEY: string;
 }
 
 interface MCPRequest {
@@ -186,7 +187,27 @@ const TOOLS = [
       required: ['channelId', 'stickerId'],
     },
   },
+  {
+    name: 'discord_send_voice',
+    description: 'Generate a voice message using ElevenLabs TTS and send it as a native Discord voice message with waveform UI',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        channelId: { type: 'string', description: 'The channel ID to send to' },
+        text: { type: 'string', description: 'The text to convert to speech (max 1000 chars)' },
+        voice: { type: 'string', description: 'Voice to use: "saint" or "tyson" (defaults to "saint")', default: 'saint' },
+      },
+      required: ['channelId', 'text'],
+    },
+  },
 ];
+
+// ============ VOICE CONFIG ============
+
+const VOICE_MAP: Record<string, string> = {
+  saint: '3D6QNDmzfza4RCqMJEIa',
+  tyson: 'YStf3ELaqewqnZwvKpHC',
+};
 
 // ============ EMOTE RESOLVER ============
 
@@ -277,10 +298,62 @@ async function fetchImageAsBlock(imageMeta: { url: string; mimeType?: string }):
   }
 }
 
+// ============ TTS ============
+
+async function generateTTS(
+  text: string,
+  apiKey: string,
+  voiceId: string,
+  outputFormat: string = 'opus_48000_128'
+): Promise<Uint8Array> {
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=${outputFormat}`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'xi-api-key': apiKey,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      text,
+      model_id: 'eleven_multilingual_v2',
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`ElevenLabs API error ${response.status}: ${errorText}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  return new Uint8Array(arrayBuffer);
+}
+
+// ============ WAVEFORM ============
+
+function generateWaveform(audioData: Uint8Array, numPoints: number = 256): string {
+  const points = new Uint8Array(numPoints);
+  const chunkSize = Math.floor(audioData.length / numPoints);
+
+  for (let i = 0; i < numPoints; i++) {
+    const start = i * chunkSize;
+    const end = Math.min(start + chunkSize, audioData.length);
+    let max = 0;
+    for (let j = start; j < end; j++) {
+      const val = Math.abs(audioData[j] - 128);
+      if (val > max) max = val;
+    }
+    points[i] = Math.min(255, max * 2);
+  }
+
+  return btoa(String.fromCharCode(...points));
+}
+
 async function handleToolCall(
   client: DiscordClient,
   name: string,
-  args: Record<string, any>
+  args: Record<string, any>,
+  env: Env
 ): Promise<{ content: any[]; isError?: boolean }> {
   try {
     switch (name) {
@@ -504,6 +577,48 @@ async function handleToolCall(
         };
       }
 
+      case 'discord_send_voice': {
+        const voiceName = (args.voice || 'saint').toLowerCase();
+        const voiceId = VOICE_MAP[voiceName] || VOICE_MAP.saint;
+        const text = args.text.slice(0, 1000);
+
+        // Generate TTS audio from ElevenLabs
+        const audioBytes = await generateTTS(text, env.ELEVENLABS_API_KEY, voiceId);
+
+        // Check if ElevenLabs returned OGG-wrapped Opus (first 4 bytes = "OggS")
+        const isOgg = audioBytes[0] === 0x4F && audioBytes[1] === 0x67 &&
+                      audioBytes[2] === 0x67 && audioBytes[3] === 0x53;
+
+        if (isOgg) {
+          // Already OGG/Opus — send as native voice message
+          const durationSecs = Math.max(1, Math.round(audioBytes.length / 16000));
+          const waveform = generateWaveform(audioBytes);
+
+          await client.sendVoiceMessage(args.channelId, audioBytes, durationSecs, waveform);
+
+          return {
+            content: [{
+              type: 'text',
+              text: `Native voice message sent to ${args.channelId} as ${voiceName} (${audioBytes.length} bytes, OGG/Opus)`,
+            }],
+          };
+        } else {
+          // Raw Opus or other format — fall back to file attachment
+          const isOpus = audioBytes.length > 0;
+          const filename = isOpus ? 'voice-message.opus' : 'voice-message.mp3';
+          const mimeType = isOpus ? 'audio/opus' : 'audio/mpeg';
+
+          await client.sendFileAttachment(args.channelId, audioBytes, filename, mimeType);
+
+          return {
+            content: [{
+              type: 'text',
+              text: `Voice message sent to ${args.channelId} as ${voiceName} (${audioBytes.length} bytes, attachment fallback — not OGG wrapped)`,
+            }],
+          };
+        }
+      }
+
       default:
         return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
     }
@@ -592,7 +707,7 @@ export default {
           if (!body.params?.name) {
             response = { jsonrpc: '2.0', id: requestId, error: { code: -32602, message: 'Missing tool name' } };
           } else {
-            const result = await handleToolCall(client, body.params.name, body.params.arguments || {});
+            const result = await handleToolCall(client, body.params.name, body.params.arguments || {}, env);
             response = { jsonrpc: '2.0', id: requestId, result };
           }
           break;
